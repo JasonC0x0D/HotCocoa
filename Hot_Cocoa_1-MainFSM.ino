@@ -28,30 +28,36 @@ int waterHeaterState = hotWaterOff;
 // Global Variables - Order
 bool orderRec = false; // True when order placed via web interface
 int orderCup = 0; // The number of cups ordered
+int orderTime = 0; // The time in min from now the Hot Cocoa is desired
 
 // Global Variables - Finite State Machines
-int msCount = 0; // On MKR1000 int max is 2,147,483,647.  (NOT SO ON UNO and similar boards!)
+unsigned long msCount = 0; // going to us millis() functionality
 // 24 hrs in ms is 8.6 million, this is plenty big enough for this use. (Remove note later?)
 bool hotWaterWanted = false; //If hot water is wanted
 bool hotWaterReady = false;  //If the water is ready
 float waterTemp = 0; // Temp of the water in degrees F
 bool pumpWater = false; // If water should be pumped
 bool waterPumped = false; // If water has been pumped
-int mixTime = 60; // The desired mix time in seconds
+unsigned long mixTime = 60; // The desired mix time in seconds
 bool cupLeftFull = false; // false = empty , true = full 
 bool cupRightFull = false; // false = empty , true = full 
-int fillTime = 10; // The time in seconds to dispense the cocoa (time valve is open) 
+unsigned long fillTime = 10; // The time in seconds to dispense the cocoa (time valve is open) 
 bool orderReady = false; // If the order is ready for pickup
 bool buttonPress = false; // The button pressed to signal drinks taken (TODO change name)
 bool refillButton = false; // The button pressed to signal a refill is wanted
-int waitTime = 0; // ------------------------------- TODO ------------ need to address wait time
+unsigned long waitTime = 0; // ------------------------------- TODO ------------ need to address wait time
 
 void setup() {
 
   pinMode(hotWaterPotPin, OUTPUT);
+  digitalWrite(hotWaterPotPin, LOW);
   pinMode(mixerPin, OUTPUT);
+  digitalWrite(mixerPin, LOW);
   pinMode(leftValve, OUTPUT);
+  digitalWrite(leftValve, LOW);
   pinMode(rightValve, OUTPUT);
+  digitalWrite(rightValve, LOW);
+  
 }
 
 void loop() {
@@ -62,11 +68,14 @@ void loop() {
     case waitForOrder:
       if(orderRec == true){
         mainState = waitToStart;
-        msCount = 0;
+        msCount = millis();
+        waitTime = (unsigned long)orderTime * 60 * 1000; // convert ordertime (min) to waitTime (ms) 
+        // max is 4.2 billion = which means the max order time is about 49 days. (plenty!)
+        // FYI (unsigned long) is used for type casting 
       }
       break;
     case waitToStart:
-      if(msCount >= (waitTime * 1000)){  // TODO diagram typo msCounter -> msCount
+      if((millis() - msCount) >= (waitTime * 1000)){  // TODO diagram typo msCounter -> msCount
         mainState = waitForWater;
         hotWaterWanted = true;
       }
@@ -87,11 +96,11 @@ void loop() {
     case addPowder:
       if(true){
         mainState = mix;
-        msCount = 0;
+        msCount = millis();
       }
       break;
     case mix:
-      if(msCount >= (mixTime * 1000)){ // (TODO *1000 on diagram)
+      if((millis() - msCount) >= (mixTime * 1000)){ // (TODO *1000 on diagram)
         mainState = dispense;
         digitalWrite(mixerPin, LOW);
       }
@@ -100,21 +109,21 @@ void loop() {
       if(cupLeftFull == false){
         mainState == fillingLeft;
         digitalWrite(leftValve, HIGH);
-        msCount = 0;                   // (TODO add msCount = 0)
+        msCount = millis();                   // (TODO add msCount = 0)
       } else if (cupRightFull == false) {
         mainState == fillingRight;
         digitalWrite(rightValve, HIGH);
-        msCount = 0;                   // (TODO add msCount = 0)
+        msCount = millis();                   // (TODO add msCount = 0)
       }
       break;
     case fillingLeft:
-      if(msCount >= fillTime){
+      if((millis() - msCount) >= fillTime){
         mainState = checkOrder;
         cupLeftFull = true;
       }
       break;      
     case fillingRight:
-      if(msCount >= fillTime){
+      if((millis() - msCount) >= fillTime){
         mainState = checkOrder;
         cupRightFull = true;
       }
@@ -192,11 +201,15 @@ void dispensePowder(){
   
 }
 
+
+// This function clears the current order //
 void clearOrder(){
 
-  // TODO
+  orderRec = false;
+  orderCup = 0;
+  orderTime = 0;
   
-}
+} // End clearOrder
 
 float getTemp(){
 
