@@ -1,14 +1,12 @@
 #include <SPI.h>
 #include <WiFi101.h>
 
-
-
 // -------- Definitions ------  //
 #define waitForOrder 0
 #define waitToStart 1
-#define waitForWater 2
-#define waitForPump 3
-#define addPowder 4
+#define heatingWater 2
+#define pumpingWater 3
+#define addingCocoa 4
 #define mix 5
 #define dispense 6
 #define fillingLeft 7
@@ -17,61 +15,84 @@
 #define orderFilled 10
 #define drinksTaken 11
 
-#define hotWaterOff 0
-#define heatingWater 1
-#define waterHot 2
+#define hotWaterPotPin 6
+#define mixerPin 2
+#define leftValve 4
+#define rightValve 5
+#define pumpPin 3
 
-#define hotWaterPotPin 7
-#define mixerPin 8
-#define leftValve 9
-#define rightValve 10
+#define DISTANCE 5000
+#define stepperDirection 8
+#define stepperStep 9
 
-// Global Variables //
+// --------------- Global Variables ---------------------- //
 
 // -- Wifi Variables -- //
-char ssid[] = "XXXXXXXXXXXX";      //  your network SSID (name)
-char pass[] = "XXXXXXXXXXXX";   // your network password
+char ssid[] = "XXXXXXXXXX";      //  your network SSID (name)
+char pass[] = "XXXXXXXXXX";   // your network password
 int keyIndex = 0;                 // your network key Index number (needed only for WEP)
 int status = WL_IDLE_STATUS;
 WiFiServer server(80);  // "Creates a server that listens for incoming connections on the specified port" - arduino website
 int bodyNum = 0; // which body to send to client.
+WiFiClient client = false; // making client a global variable
 
-// Global Variables - Order
+// -- Order Variables -- //
 bool orderRec = false; // True when order placed via web interface
-int orderCup = 0; // The number of cups ordered
+int orderCup = 2; // The number of cups ordered
 int orderTime = 0; // The time in min from now the Hot Cocoa is desired
 
-// Global Variables - Finite State Machines
-int mainState = waitForOrder;
-int waterHeaterState = hotWaterOff; 
+// -- Finite State Machine -- //
+int mainState = waitToStart;
 unsigned long msCount = 0; // going to us millis() functionality
 // 24 hrs in ms is 8.6 million, this is plenty big enough for this use. (Remove note later?)
-bool hotWaterWanted = false; //If hot water is wanted
-bool hotWaterReady = false;  //If the water is ready
-float waterTemp = 0; // Temp of the water in degrees F
-bool pumpWater = false; // If water should be pumped
-bool waterPumped = false; // If water has been pumped
-unsigned long mixTime = 60; // The desired mix time in seconds
+unsigned long mixTime = 2; // The desired mix time in seconds
 bool cupLeftFull = false; // false = empty , true = full 
 bool cupRightFull = false; // false = empty , true = full 
-unsigned long fillTime = 10; // The time in seconds to dispense the cocoa (time valve is open) 
+unsigned long fillTime = 20; // The time in seconds to dispense the hot cocoa (time valve is open) 
 bool orderReady = false; // If the order is ready for pickup
 bool buttonPress = false; // The button pressed to signal drinks taken (TODO change name)
 bool refillButton = false; // The button pressed to signal a refill is wanted
 unsigned long waitTime = 0; // ------------------------------- TODO ------------ need to address wait time
-WiFiClient client = false; // making client a global variable 
+bool conversionStart = false; // tempSensor if the conversion has started yet. 
+int heatingTime = (5*60); // Time to heat water in seconds
+int waterPumpWaitTime = 5;// Time to pump in seconds
+
+// -- Stepper Motor -- //
+int StepCounter = 0;
+int Stepping = false;
+int Powder = 0;
 
 void setup() {
+// ----------------------- Serial Setup --------------------- //
+  Serial.begin(9600);
+  delay(3000);
+  Serial.println("Serial Port Opened");
+  
+// ------------------------- Wifi Setup -------------------- //
 
-// Wifi Setup //
+// TODO static IP address... not currently working may need to update IDE? though unlikely.
+// IPAddress desiredIP = (192, 168, 11, 23);
+// WiFi.config(desiredIP);
+  
   while ( status != WL_CONNECTED) {
     // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
-    status = WiFi.begin(ssid, pass);
+    status = WiFi.begin(ssid, pass);    
     // wait 10 seconds for connection:
     delay(10000);
   }
   server.begin(); // start the web server on port 80 (defined above around line 36)
+
+  // print the MKR1000's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  Serial.println(ip);
   
+  
+// ----------------------- Powder Delivery Setup -------------- //
+  pinMode(stepperStep, OUTPUT);    
+  pinMode(stepperDirection, OUTPUT);
+  digitalWrite(stepperStep, LOW);
+  digitalWrite(stepperDirection, LOW);
 
   
 // Finite State Machine Setup //
@@ -87,6 +108,9 @@ void setup() {
 }
 
 void loop() {
+
+  Serial.print("Current State: ");
+  Serial.println(mainState);
 
 // ------ Wifi Server ------- //
 
@@ -118,11 +142,11 @@ void loop() {
            // Check the client request:
            if (currentLine.endsWith("GET /order")) {
               orderRec = true;               // order recived!
-              orderTime = 1; // hard coded now for example - TODO make it a variable
+              orderTime = 0; // hard coded now for example - TODO make it a variable
               orderCup = 2;   // hard coded now for example - TODO make it a variable
            }
-           if (currentLine.endsWith("GET /status")) {
-             bodyNum = 2;
+           if (currentLine.endsWith("GET /state")) {
+             bodyNum = 1;
            }         
          }      
        }
@@ -143,57 +167,64 @@ void loop() {
       }
       break;
     case waitToStart:
-      if((millis() - msCount) >= (waitTime * 1000)){  // TODO diagram typo msCounter -> msCount
-        mainState = waitForWater;
-        hotWaterWanted = true;
+      if((millis() - msCount) >= (waitTime)){ 
+        mainState = heatingWater;
+        digitalWrite(hotWaterPotPin, HIGH);
+        msCount = millis();
       }
       break;
-    case waitForWater:
-      if(hotWaterReady == true){
-        mainState = waitForPump;
-        pumpWater = true;
+    case heatingWater:
+      if((millis() - msCount) >= (heatingTime * 1000)){
+        mainState = pumpingWater;
+        digitalWrite(hotWaterPotPin, LOW);
+        digitalWrite(pumpPin, HIGH);
+        msCount = millis();
       }
       break;
-    case waitForPump:
-      if(waterPumped == true){
-        mainState = addPowder;
+    case pumpingWater:
+      if((millis() - msCount) >= (waterPumpWaitTime * 1000)){
+        mainState = addingCocoa;
         digitalWrite(mixerPin, HIGH);
+        digitalWrite(pumpPin,LOW);
         dispensePowder();
       }
       break;
-    case addPowder:
+    case addingCocoa:
       if(true){
+        dispensePowder();
         mainState = mix;
         msCount = millis();
       }
       break;
     case mix:
-      if((millis() - msCount) >= (mixTime * 1000)){ // (TODO *1000 on diagram)
+      if((millis() - msCount) >= (mixTime * 1000)){
         mainState = dispense;
         digitalWrite(mixerPin, LOW);
       }
       break;
     case dispense:
       if(cupLeftFull == false){
-        mainState == fillingLeft;
+        mainState = fillingLeft;
         digitalWrite(leftValve, HIGH);
         msCount = millis();                   // (TODO add msCount = 0)
       } else if (cupRightFull == false) {
-        mainState == fillingRight;
+        mainState = fillingRight;
         digitalWrite(rightValve, HIGH);
         msCount = millis();                   // (TODO add msCount = 0)
-      }
+      } 
       break;
     case fillingLeft:
-      if((millis() - msCount) >= fillTime){
+      if((millis() - msCount) >= fillTime * 1000){
         mainState = checkOrder;
         cupLeftFull = true;
+        digitalWrite(leftValve, LOW);
       }
       break;      
     case fillingRight:
-      if((millis() - msCount) >= fillTime){
+      if((millis() - msCount) >= fillTime * 1000){
         mainState = checkOrder;
         cupRightFull = true;
+        digitalWrite(rightValve, LOW);
       }
       break;      
     case checkOrder:
@@ -204,7 +235,9 @@ void loop() {
         mainState = orderFilled;
         orderReady = true;  
       } else if ( orderCup == 2 && cupRightFull == false){
-        mainState = waitForWater;
+        mainState = pumpingWater;
+        msCount = millis();
+        digitalWrite(pumpPin, HIGH);
       }
       break;
     case orderFilled:
@@ -215,54 +248,46 @@ void loop() {
       break;  
     case drinksTaken:
       if(refillButton == true){
-        mainState = waitForWater;
-        orderCup == 1; // (TODO Add to diagram)
+        mainState = pumpingWater;
+        orderCup = 1;
+        digitalWrite(pumpPin, HIGH);
+        msCount = millis();
       }
       break;  
   }  // End Main FSM
-  
-// ------- Hot Water Finite State Machine --------- //
-  switch (waterHeaterState)
-    {
-      case hotWaterOff:
-        if(hotWaterWanted == true){
-          digitalWrite(hotWaterPotPin,HIGH);
-          waterHeaterState = heatingWater;
-        }
-        break;
-      case heatingWater:
-         waterTemp = getTemp(); // Update Water Temp 
-        if(hotWaterWanted == false){
-          waterHeaterState = hotWaterOff;
-          digitalWrite(hotWaterPotPin,LOW);
-        } else if(waterTemp >= 180){
-          waterHeaterState = waterHot;
-          digitalWrite(hotWaterPotPin,LOW);
-          hotWaterReady = true;
-        }
-        break;
-      case waterHot:
-        waterTemp = getTemp(); //Update Water Temp
-        if(waterTemp <= 170){
-          //Same State
-          digitalWrite(hotWaterPotPin,HIGH);
-        } else if(waterTemp >= 180){
-          //Same State
-          digitalWrite(hotWaterPotPin,LOW);
-        } else if(hotWaterWanted == false){
-          waterHeaterState = hotWaterOff;
-          digitalWrite(hotWaterPotPin,LOW);
-          hotWaterReady = false;
-        }
-        break;
-      } // End Hot Water FSM
 
 } // End Loop
 
-void dispensePowder(){
-
-  // TODO
+void dispensePowder()
+{
+  digitalWrite(stepperDirection, LOW);     // Direction pin low to move "forward"
+  static int msCurrent = 0;
+  static int delayTime = 200; // delay time between steps in microseconds
+                              // lower delay time = motor spinning faster
+                              // however too fast and the motor can't keep up.
   
+  for(int x= 1; x<12000; x++)  // With the current setup this dispenses about 1 Tablespoon of cocoa powder (12000 steps = 1 Tablespoon)
+    {
+    digitalWrite(stepperStep,HIGH); // Trigger one step forward
+    msCurrent = micros();
+    while(micros() <= (msCurrent+delayTime)){ // using this timing method instead of delay becuase it is faster
+      // do nothing
+    }
+    digitalWrite(stepperStep,LOW); //Pull step pin low so it can be triggered again
+    msCurrent = micros();
+    while(micros() <= (msCurrent+delayTime)){
+      // do nothing
+    }
+  }
+  
+} // End dispensePowder
+
+void mixCocoa(bool mixerOn){
+  if( mixerOn == true){
+    // turn on the mixer
+  } else if ( mixerOn == false){
+    // turn of the mixer
+  }
 }
 
 
@@ -275,11 +300,7 @@ void clearOrder(){
   
 } // End clearOrder
 
-float getTemp(){
 
-// TODO
-
-}// End getTemp
 
 // ----- WIFI Functions ------//
 void sendHeader(){
@@ -313,12 +334,5 @@ void sendBody(int num){
 void sendEnd(){
   client.println();
 } // end sendEnd
-
-
-
-
-
-
-
 
 
